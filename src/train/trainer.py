@@ -5,13 +5,20 @@ import time
 import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
+import torchaudio.functional as F # for edit distance
 from pathlib import Path
 from omegaconf import OmegaConf
+from functools import partial
+from typing import Dict, Any, Tuple
+from torch.utils.data import DataLoader
+
+import pdb
+
 
 from src.dataset.utils import train_test_split_indices, get_all_files
 from src.dataset.dataset import BrainToTextDataset
-from torch.utils.data import DataLoader
 from src.train.utils import transform_data
+from src.dataset.utils import get_all_files
 
 
 from src.train.models import GRUDecoder
@@ -30,9 +37,9 @@ class Trainer:
 
         self.best_val_loss = torch.inf
         self.best_val_per = torch.inf
-        self.cur_val_loss = torch.inf
         self.cur_val_per = torch.inf
-
+        self.cur_val_loss = torch.inf
+    
         self._setup_conf_params()
         self._device_setup()
         self._log_model_info()
@@ -92,6 +99,9 @@ class Trainer:
 
         self.model_patch_size = self.config['model']['patch_size']
         self.model_patch_stride = self.config['model']['patch_stride']
+
+        self.log_per_by_day = self.config['logging']['log_per_by_day']
+        self.checkpoint_save_interval = train_config['checkpoint_save_interval']
 
         
         if seed != -1:
@@ -182,74 +192,43 @@ class Trainer:
         return optim 
     
     def create_cosine_lr_scheduler(self, optim):
-        self.logger.info("Creating cosine LR schedular")
-        lr_max = self.lr_max
-        lr_min = self.lr_min
-        lr_decay_steps = self.lr_decay_steps
-        lr_max_day =  self.lr_max_day
-        lr_min_day = self.lr_min_day
-        lr_decay_steps_day = self.lr_decay_steps_day
-        lr_warmup_steps = self.lr_warmup_steps
-        lr_warmup_steps_day = self.lr_decay_steps_day
+        """
+        Creates a cosine learning rate scheduler with warmup.
+        Supports different LR schedules for different parameter groups.
+        """
+        self.logger.info("Creating cosine LR scheduler")
 
-        def lr_lambda(current_step, min_lr_ratio, decay_steps, warmup_steps):
-            '''
-            Create lr lambdas for each param group that implement cosine decay
-
-            Different lr lambda decaying for day params vs rest of the model
-            '''
-            # Warmup phase
-            if current_step < warmup_steps:
-                return float(current_step) / float(max(1, warmup_steps))
-            
-            # Cosine decay phase
-            if current_step < decay_steps:
-                progress = float(current_step - warmup_steps) / float(
-                    max(1, decay_steps - warmup_steps)
-                )
+        def lr_lambda(step: int, min_lr_ratio: float, decay_steps: int, warmup_steps: int) -> float:
+            """Cosine decay with linear warmup."""
+            if step < warmup_steps:
+                return float(step) / float(max(1, warmup_steps))
+            elif step < decay_steps:
+                progress = (step - warmup_steps) / max(1, decay_steps - warmup_steps)
                 cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
-                # Scale from 1.0 to min_lr_ratio
                 return max(min_lr_ratio, min_lr_ratio + (1 - min_lr_ratio) * cosine_decay)
-            
-            # After cosine decay is complete, maintain min_lr_ratio
             return min_lr_ratio
 
+        # Map param groups to their LR settings
+        param_group_configs = []
         if len(optim.param_groups) == 3:
-            lr_lambdas = [
-                lambda step: lr_lambda(
-                    step, 
-                    lr_min / lr_max, 
-                    lr_decay_steps, 
-                    lr_warmup_steps), # biases 
-                lambda step: lr_lambda(
-                    step, 
-                    lr_min_day / lr_max_day, 
-                    lr_decay_steps_day,
-                    lr_warmup_steps_day, 
-                    ), # day params
-                lambda step: lr_lambda(
-                    step, 
-                    lr_min / lr_max, 
-                    lr_decay_steps, 
-                    lr_warmup_steps), # rest of model weights
+            param_group_configs = [
+                (self.lr_min / self.lr_max, self.lr_decay_steps, self.lr_warmup_steps),       # biases
+                (self.lr_min_day / self.lr_max_day, self.lr_decay_steps_day, self.lr_warmup_steps_day),  # day params
+                (self.lr_min / self.lr_max, self.lr_decay_steps, self.lr_warmup_steps),       # rest of weights
             ]
         elif len(optim.param_groups) == 2:
-            lr_lambdas = [
-                lambda step: lr_lambda(
-                    step, 
-                    lr_min / lr_max, 
-                    lr_decay_steps, 
-                    lr_warmup_steps), # biases 
-                lambda step: lr_lambda(
-                    step, 
-                    lr_min / lr_max, 
-                    lr_decay_steps, 
-                    lr_warmup_steps), # rest of model weights
+            param_group_configs = [
+                (self.lr_min / self.lr_max, self.lr_decay_steps, self.lr_warmup_steps),       # biases
+                (self.lr_min / self.lr_max, self.lr_decay_steps, self.lr_warmup_steps),       # rest of weights
             ]
         else:
             raise ValueError(f"Invalid number of param groups in optimizer: {len(optim.param_groups)}")
-        
-        return LambdaLR(optim, lr_lambdas, -1)
+
+        # Create LambdaLR schedulers using functools.partial to avoid repeated lambdas
+        lr_lambdas = [partial(lr_lambda, min_lr_ratio=cfg[0], decay_steps=cfg[1], warmup_steps=cfg[2])
+                    for cfg in param_group_configs]
+
+        return LambdaLR(optim, lr_lambdas)
 
     def load_model_checkpoint(self):
         self.logger.info("Loading model checkpoint")
@@ -273,9 +252,9 @@ class Trainer:
 
         self.logger.info("Loaded model checkpoint")
 
-    def save_model_checkpoint(self, path):
+    def save_model_checkpoint(self, batch_no, best=False):
         self.logger.info("Saving model checkpoint")
-
+        
         checkpoint = {
             'model_state_dict' : self.model.state_dict(),
             'optimizer_state_dict' : self.optimizer.state_dict(),
@@ -283,10 +262,15 @@ class Trainer:
             'val_per' : self.cur_val_per,
             'val_loss' : self.cur_val_loss
         }
-
-        torch.save(checkpoint, path)
-        self.logger.info("Saved model to checkpoint: " + path)
-
+        if not best:
+            path = Path(self.checkpoint_dir, f'checkpoint-{batch_no}')
+            torch.save(checkpoint, path)
+            self.logger.info("Saved model to checkpoint: " + path)
+        else:
+            path = Path(self.checkpoint_dir, f'best_model')
+            torch.save(checkpoint, path)
+            self.logger.info("Saved model to checkpoint: {path}")
+        
         with open(os.path.join(self.checkpoint_dir, 'args.yaml'), 'w') as f:
             OmegaConf.save(config=self.config, f=f)
 
@@ -295,7 +279,7 @@ class Trainer:
         labels = batch['seq_class_ids'].to(self.device)
         n_time_steps = batch['n_time_steps'].to(self.device)
         phone_seq_lens = batch['phone_seq_lens'].to(self.device)
-        day_indicies = batch['day_indicies'].to(self.device)
+        day_indicies = batch['day_indices'].to(self.device)
 
         return features, labels, n_time_steps, phone_seq_lens, day_indicies
 
@@ -326,10 +310,9 @@ class Trainer:
     def train(self, train_loader, val_loader):
         self.logger.info("Starting training")
         
-        patch_size = self.config['dataset']
-
         trains_losses = []
         val_losses = []
+        val_results = []
 
         train_pers = []
         val_pers = []
@@ -366,17 +349,159 @@ class Trainer:
                     f'loss: {(loss.detach().item()):.2f} ' +
                     f'grad norm: {grad_norm:.2f} '
                     f'time: {train_step_duration:.3f}')
+            
             if i % self.batches_per_val_step == 0:
-                self.logger.info(f"Running val after {i+1} batches")
+                self.logger.info(f"Running val after {i} batches")
                 start_time = time.time()
-                val_metrics = self.validation(
+                val_metrics, session_day_dict = self.validation(
                     val_loader=val_loader
                 )
+                val_step_duration = time.time() - start_time
+                self.logger.info(f'Validation batch {i}: ' +
+                        f'PER (avg): {val_metrics["avg_per"]:.4f} ' +
+                        f'CTC Loss (avg): {val_metrics["avg_loss"]:.4f} ' +
+                        f'time: {val_step_duration:.3f}')
+                
+                if self.log_per_by_day:
+                    for day in val_metrics['day_pers'].keys():
+                        val_per_day = val_metrics['day_pers'][day]['total_edit_distance']/val_metrics['day_pers'][day]['total_seq_length']
+                        self.logger.info(
+                            f"Day:{day} Session:{session_day_dict[day]} Val PER:{val_per_day:0.4f}"
+                        )
+                    
+                self.cur_val_per = val_metrics['avg_per']
+                self.cur_val_loss = val_metrics['avg_loss']
+                val_pers.append(self.cur_val_per)
+                val_losses.append(self.cur_val_loss)
+                val_results.append(val_metrics)
 
-    def validation(self, val_loader):
+                if self.cur_val_loss< self.best_val_per:
+                    self.save_model_checkpoint(batch_no=i, best=True)
+                    val_steps_since_improvemnt = 0
+                else:
+                    val_steps_since_improvemnt += 1
+                
+            if i+1 % self.checkpoint_save_interval == 0:
+                self.save_model_checkpoint(batch_no=i, best=False)
+            
+            if val_steps_since_improvemnt>20:
+                self.logger.info(" EARLY STOPPED")
+                break
+
+        train_duration = time.time()-train_start_time
+        self.logger.info(f"Best avg val PER {self.best_val_PER:.5f}")
+        self.logger.info(f'Total training time: {(train_duration / 60):.2f} minutes')
+
+        
+
+    def validation(self, val_loader) -> Tuple[Dict[str, Any], Dict[int, str]]:
+        """
+        Run validation loop with CTC loss and phone error rate (PER) calculation.
+
+        Args:
+            val_loader: PyTorch DataLoader for validation data.
+
+        Returns:
+            metrics (dict): Aggregated validation metrics.
+            session_day_dict (dict): Mapping from day index to session name.
+        """
         self.model.eval()
 
+        metrics = {
+            "decoded_seqs": [],
+            "true_seq": [],
+            "phone_seq_lens": [],
+            "transcription": [],
+            "losses": [],
+            "block_nums": [],
+            "trial_nums": [],
+            "day_indices": [],
+        }
 
+        total_edit_distance = 0
+        total_seq_length = 0
+        day_per = {}
+
+        # Collect sessions per day
+        filepaths = get_all_files(
+            parent_dir=self.config["dataset"]['info']["dataset_dir"], kind="val"
+        )
+
+        day_index = 0
+        session_day_dict = {}
+        for session, paths in filepaths.items():
+            if not session.startswith("t15.20") :
+                continue
+            if len(paths)<1:
+                day_index += 1
+                continue
+            day_per[day_index] = {"total_edit_distance": 0, "total_seq_length": 0}
+            session_day_dict[day_index] = session
+            day_index += 1
+
+        # Validation loop
+        for batch in val_loader:
+            with torch.no_grad():
+                features, labels, n_time_steps, phone_seq_lens, day_indicies = (
+                    self._get_batch(batch)
+                )
+                adjusted_lens = (
+                    (n_time_steps - self.model_patch_size) / self.model_patch_stride + 1
+                ).to(torch.int32)
+
+                logits = self.model(features, day_indicies)
+
+                loss = self.CTC_loss(
+                    log_probs=logits.log_softmax(2).permute(1, 0, 2),
+                    targets=labels,
+                    input_lengths=adjusted_lens,
+                    target_lengths=phone_seq_lens,
+                ).mean()
+
+            metrics["losses"].append(loss.item())
+
+            # Decode predictions and compute edit distance
+            batch_edit_distance = 0
+            decoded_seqs = []
+
+            for idx in range(logits.shape[0]):
+                decoded_seq = torch.argmax(
+                    logits[idx, : adjusted_lens[idx], :], dim=-1
+                )
+                decoded_seq = torch.unique_consecutive(decoded_seq, dim=-1)
+                decoded_seq = decoded_seq.cpu().numpy()
+                decoded_seq = np.array([i for i in decoded_seq if i != 0])
+
+                true_seq = labels[idx, : phone_seq_lens[idx]].cpu().numpy()
+
+                batch_edit_distance += F.edit_distance(decoded_seq, true_seq)
+                decoded_seqs.append(decoded_seq)
+
+            # Day-level aggregation
+            day = batch["day_indices"][0].item()
+            if day in day_per:
+                day_per[day]["total_edit_distance"] += batch_edit_distance
+                day_per[day]["total_seq_length"] += phone_seq_lens.sum().item()
+
+            total_edit_distance += batch_edit_distance
+            total_seq_length += phone_seq_lens.sum().item()
+
+            # Save batch metrics
+            metrics["decoded_seqs"].append(decoded_seqs)
+            metrics["true_seq"].append(batch["seq_class_ids"].cpu().numpy())
+            metrics["phone_seq_lens"].append(batch["phone_seq_lens"].cpu().numpy())
+            metrics["transcription"].append(batch["transcriptions"])
+            metrics["block_nums"].append(batch["block_nums"].numpy())
+            metrics["trial_nums"].append(batch["trial_nums"].numpy())
+            metrics["day_indices"].append(batch["day_indices"].cpu().numpy())
+
+        # Aggregate metrics
+        avg_per = total_edit_distance / total_seq_length
+        metrics["day_pers"] = day_per
+        metrics["avg_per"] = avg_per
+        metrics["avg_loss"] = float(np.mean(metrics["losses"]))
+
+        return metrics, session_day_dict
 
 
 
@@ -386,11 +511,6 @@ def training_pipeline(config, logger):
     shuffle = train_conf['shuffle_data']
     n_data_workers = train_conf['n_data_workers']
 
-    train_filepaths = get_all_files(config['dataset']['info']['dataset_dir'], kind='val', logger=logger)
-
-    
-    
-
     
     train_filepaths = get_all_files(config['dataset']['info']['dataset_dir'], kind='train', logger=logger)
     train_trials, _ = train_test_split_indices(
@@ -399,17 +519,12 @@ def training_pipeline(config, logger):
         logger=logger
     )
     train_ds = BrainToTextDataset(
-        trial_indices=train_trials,
-        config=config,
-        logger=logger,
-        kind='train'
+        trial_indices=train_trials, config=config,
+        logger=logger, kind='train'
     )
     train_loader = DataLoader(
-        train_ds, 
-        batch_size=None,
-        shuffle=shuffle,
-        num_workers=n_data_workers,
-        pin_memory=pin_memory
+        train_ds, batch_size=None,  shuffle=shuffle,
+        num_workers=n_data_workers, pin_memory=pin_memory
     )
 
     val_filepaths = get_all_files(config['dataset']['info']['dataset_dir'], kind='val', logger=logger)
@@ -419,35 +534,27 @@ def training_pipeline(config, logger):
         logger=logger
     )
     val_ds = BrainToTextDataset(
-        trial_indices=val_trails,
-        config=config,
-        logger=logger,
-        kind='test'
+        trial_indices=val_trails, config=config,
+        logger=logger, kind='test'
     )
     val_loader =  DataLoader(
-        val_ds, 
-        batch_size=None,
-        shuffle=False,
-        num_workers=n_data_workers,
-        pin_memory=pin_memory
+        val_ds, batch_size=None, shuffle=False,
+        num_workers=n_data_workers, pin_memory=pin_memory
     )
     
 
     model = GRUDecoder(
-        neural_dim=512,
-        n_units=768,
-        n_days=45,
-        n_classes=41,
-        rnn_dropout=0.1,
-        input_dropout=0.1,
-        n_layers=5,
-        patch_size=14,
-        patch_stride=4
+        config=config
     )
     
     trainer = Trainer(
         config=config,
         logger=logger,
         model=model
+    )
+
+    trainer.train(
+        train_loader=train_loader,
+        val_loader=val_loader
     )
 

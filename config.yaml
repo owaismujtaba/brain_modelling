@@ -7,12 +7,13 @@ logging:
   name: 'training'
   level: INFO
   log_file_path: 'logs/training.log'
+  log_per_by_day: true
 
 run: 'train'
 
 dataset:
   info:
-    dataset_dir: 'C:\Users\Investigador\work\nejm-brain-to-text\data'
+    dataset_dir: 'data'
     bad_trials_dict: None
     seed: -1
   data_transforms:
@@ -26,9 +27,23 @@ dataset:
     smooth_data: true
     smooth_kernel_std: 2
 
+model:
+  name: 'GRU'
+  neural_dim: 512
+  n_units: 768
+  n_layers: 7
+  max_seq_elements: 500
+  n_days: 45
+  input_dropout: 0.1
+  rnn_dropout: 0.2
+  n_classes: 41
+  patch_size: 14 # size of the input patches (14 time steps)
+  patch_stride: 4 # stride for the input patches (4 time steps)
+
+
 train:
   init_from_checkpoint: false
-  init_checkpoint_path: ''
+  init_checkpoint_path: '/home/owais/Desktop/work/brain_modelling/trained_models/GRU/checkpoint/best_model'
 
   test_percentage: 0
   batch_size: 64
@@ -60,17 +75,10 @@ train:
   seed: 10
   grad_norm_clip_value: 10
 
-  batches_per_train_log: 200 # number of batches per training log
-  batches_per_val_step: 2000 
+  batches_per_train_log: 1 # number of batches per training log
+  batches_per_val_step: 2 
 
-model:
-  name: 'GRU'
-  neural_dim: 512
-  max_seq_elements: 500
-  n_classes: 41
-  patch_size: 14 # size of the input patches (14 time steps)
-  patch_stride: 4 # stride for the input patches (4 time steps)
-
+  checkpoint_save_interval: 1000
 
 directory:
   output_dir: "trained_models/${model.name}"

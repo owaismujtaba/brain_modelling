@@ -95,7 +95,7 @@ class BrainToTextDataset(Dataset):
                         total_bad_trials += 1
                         continue
         
-        self.logger.info(f"Total bad trials:: {total_bad_trials}")
+        
         # Pad sequences to form a cohesive batch
         batch["input_features"] = pad_sequence(
             batch["input_features"], batch_first=True, padding_value=0

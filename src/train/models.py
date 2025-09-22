@@ -7,41 +7,10 @@ class GRUDecoder(nn.Module):
 
     This class combines day-specific input layers, a GRU, and an output classification layer
     '''
-    def __init__(self,
-                 neural_dim,
-                 n_units,
-                 n_days,
-                 n_classes,
-                 rnn_dropout = 0.0,
-                 input_dropout = 0.0,
-                 n_layers = 5, 
-                 patch_size = 0,
-                 patch_stride = 0,
-                 ):
-        '''
-        neural_dim  (int)      - number of channels in a single timestep (e.g. 512)
-        n_units     (int)      - number of hidden units in each recurrent layer - equal to the size of the hidden state
-        n_days      (int)      - number of days in the dataset
-        n_classes   (int)      - number of classes 
-        rnn_dropout    (float) - percentage of units to droupout during training
-        input_dropout (float)  - percentage of input units to dropout during training
-        n_layers    (int)      - number of recurrent layers 
-        patch_size  (int)      - the number of timesteps to concat on initial input layer - a value of 0 will disable this "input concat" step 
-        patch_stride(int)      - the number of timesteps to stride over when concatenating initial input 
-        '''
+    def __init__(self, config):
         super(GRUDecoder, self).__init__()
-        
-        self.neural_dim = neural_dim
-        self.n_units = n_units
-        self.n_classes = n_classes
-        self.n_layers = n_layers 
-        self.n_days = n_days
-
-        self.rnn_dropout = rnn_dropout
-        self.input_dropout = input_dropout
-        
-        self.patch_size = patch_size
-        self.patch_stride = patch_stride
+        self.config = config
+        self._setup_conf_params()
 
         # Parameters for the day-specific input layers
         self.day_layer_activation = nn.Softsign() # basically a shallower tanh 
@@ -54,7 +23,7 @@ class GRUDecoder(nn.Module):
             [nn.Parameter(torch.zeros(1, self.neural_dim)) for _ in range(self.n_days)]
         )
 
-        self.day_layer_dropout = nn.Dropout(input_dropout)
+        self.day_layer_dropout = nn.Dropout(self.input_dropout)
         
         self.input_size = self.neural_dim
 
@@ -84,6 +53,23 @@ class GRUDecoder(nn.Module):
 
         # Learnable initial hidden states
         self.h0 = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(1, 1, self.n_units)))
+
+    def _setup_conf_params(self):
+        model_conf = self.config['model']
+        self.name = model_conf['name']
+        self.neural_dim = model_conf['neural_dim']
+        self.n_units = model_conf['n_units']
+        self.n_layers = model_conf['n_layers']
+        self.max_seq_elements = model_conf['max_seq_elements']
+        self.input_dropout = model_conf['input_dropout']
+        self.rnn_dropout = model_conf['rnn_dropout']
+        self.patch_size = model_conf['patch_size']
+        self.patch_stride = model_conf['patch_stride']
+        self.n_days = model_conf['n_days']
+        self.n_classes = model_conf['n_classes']
+        
+        
+
 
     def forward(self, x, day_idx, states = None, return_state = False):
         '''
