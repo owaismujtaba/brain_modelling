@@ -1,14 +1,147 @@
 import math
 import os
+import pandas as pd
 import pdb  # Consider removing if unused
 
 import h5py
 import numpy as np
+from pathlib import Path
 import torch
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 
 from src.utils import log_info
+from src.dataset.utils import get_all_files, load_h5py_file
+from src.inference.utils import LOGIT_TO_PHONEME
+
+
+import pdb
+from typing import Dict, List, Tuple, Any
+
+
+class DatasetLLM:
+    """Dataset handler for LLM training and validation data."""
+
+    def __init__(self, config: Dict[str, Any], logger):
+        """
+        Initialize the dataset object.
+
+        Args:
+            config (dict): Configuration dictionary.
+            logger: Logger instance for logging.
+        """
+        log_info(logger=logger, text="LLM Dataset Initialization")
+        self.config = config
+        self.logger = logger
+        self._setup_config_params()
+
+        self.val_filepaths = get_all_files(
+            parent_dir=self.dataset_dir, kind="val"
+        )
+        self.train_filepaths = get_all_files(
+            parent_dir=self.dataset_dir, kind="train"
+        )
+
+        self._extract_data()
+        self._save_data()
+
+    def _setup_config_params(self) -> None:
+        """Set dataset configuration parameters."""
+        self.dataset_dir = self.config["dataset"]["info"]["dataset_dir"]
+        self.llm_dir = self.config['directory']['llm_dataset_dir']
+        self.cur_dir = os.getcwd()
+
+    def _get_phenome_text(self, seq_class_ids: List[int]) -> str:
+        """
+        Convert class IDs to phoneme text.
+
+        Args:
+            seq_class_ids (list): List of class IDs.
+
+        Returns:
+            str: Space-separated phoneme string.
+        """
+        seq_class_ids = [
+            int(p)
+            for i, p in enumerate(seq_class_ids)
+            if p != 0 and (i == 0 or p != seq_class_ids[i - 1])
+        ]
+        phenome_text = [LOGIT_TO_PHONEME[p] for p in seq_class_ids]
+        return " ".join(phenome_text)
+
+    def _get_data(self, filepath: str) -> Tuple[List[str], List[str]]:
+        """
+        Load text and phoneme sequences from an HDF5 file.
+
+        Args:
+            filepath (str): Path to the HDF5 file.
+
+        Returns:
+            tuple: (sentences_text, sentences_phenomes)
+        """
+        data = load_h5py_file(filepath)
+        sentences_text = data["sentence_label"]
+        sentences_phenomes = [
+            self._get_phenome_text(seq) for seq in data["seq_class_ids"]
+        ]
+        return sentences_text, sentences_phenomes
+
+    def _extract_from_filepaths(
+        self, filepaths: Dict[str, List[str]], label: str
+    ) -> Tuple[List[str], List[str]]:
+        """
+        Extract data from filepaths for a dataset split.
+
+        Args:
+            filepaths (dict): Mapping of session → filepaths.
+            label (str): Label for logging (e.g., "Train" or "Val").
+
+        Returns:
+            tuple: (text_sentences, phenome_sentences)
+        """
+        self.logger.info(f"Extracting data for {label} filepaths")
+        text_sentences, phenome_sentences = [], []
+
+        for session, paths in filepaths.items():
+            if not paths:
+                continue
+            path = paths[0]
+            sentences_text, sentences_phenomes = self._get_data(path)
+
+            text_sentences.extend(sentences_text)
+            phenome_sentences.extend(sentences_phenomes)
+
+            self.logger.info(
+                f"Extracted {len(sentences_text)} trials from {session}"
+            )
+
+        return text_sentences, phenome_sentences
+
+    def _extract_data(self) -> None:
+        """Extract train and validation data."""
+        train_texts, train_phenomes = self._extract_from_filepaths(
+            self.train_filepaths, "Train"
+        )
+        val_texts, val_phenomes = self._extract_from_filepaths(
+            self.val_filepaths, "Val"
+        )
+
+        # Concatenate results
+        self.text_sentences = train_texts + val_texts
+        self.phenome_sentences = train_phenomes + val_phenomes
+    
+    def _save_data(self):
+        self.logger.info("Saving LLM dataset")
+        folder = Path(self.cur_dir, self.llm_dir)
+        os.makedirs(folder)
+        path = Path(folder, 'llm_data.csv')
+
+        dataset = {'text':self.text_sentences, 'phenomes':self.phenome_sentences}
+
+        dataset = pd.DataFrame(dataset)
+        dataset.to_csv(path)
+        self.logger.info(f"LLM dataset saved to {path}")
+
 
 
 class BrainToTextDataset(Dataset):

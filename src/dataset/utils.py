@@ -6,6 +6,52 @@ import pdb
 
 from src.utils import log_info
 
+import h5py
+from typing import Dict, Any
+
+
+def load_h5py_file(file_path: str) -> Dict[str, list[Any]]:
+    """Load data from an HDF5 file into a dictionary."""
+
+    data = {
+        "neural_features": [],
+        "n_time_steps": [],
+        "seq_class_ids": [],
+        "seq_len": [],
+        "transcriptions": [],
+        "sentence_label": [],
+        "session": [],
+        "block_num": [],
+        "trial_num": [],
+    }
+
+    with h5py.File(file_path, "r") as file:
+        for key in file.keys():
+            group = file[key]
+
+            # Required datasets
+            data["neural_features"].append(group["input_features"][:])
+            data["n_time_steps"].append(group.attrs["n_time_steps"])
+            data["session"].append(group.attrs["session"])
+            data["block_num"].append(group.attrs["block_num"])
+            data["trial_num"].append(group.attrs["trial_num"])
+
+            # Optional datasets
+            data["seq_class_ids"].append(
+                group["seq_class_ids"][:] if "seq_class_ids" in group else None
+            )
+            data["transcriptions"].append(
+                group["transcription"][:] if "transcription" in group else None
+            )
+
+            # Optional attributes
+            data["seq_len"].append(group.attrs.get("seq_len", None))
+            data["sentence_label"].append(group.attrs.get("sentence_label", None))
+
+    return data
+
+
+
 
 def train_test_split_indices(config, logger, file_paths):
     """

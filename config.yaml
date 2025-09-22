@@ -3,10 +3,11 @@ experiment:
   description: Text decoding from brain signals
   version: 1.0.0
 
-run: 'train'
+run: 'create_llm_dataset' # train/inference
+create_llm_dataset: true
 
 logging:
-  name: 'training'
+  name: 'create_llm_dataset'
   level: INFO
   log_file_path: 'logs/${run}.log'
   log_per_by_day: true
@@ -15,7 +16,7 @@ logging:
 
 dataset:
   info:
-    dataset_dir: 'data/raw/hdf5_data_final/'
+    dataset_dir: 'C:\Users\Investigador\work\brain_modelling\data\data\raw\hdf5_data_final'
     bad_trials_dict: None
     seed: -1
     description_filepath: 'data/raw/t15_copyTaskData_description.csv'
@@ -92,3 +93,4 @@ train:
 directory:
   output_dir: "trained_models/${model.name}"
   checkpoint_dir: "trained_models/${model.name}/checkpoint"
+  llm_dataset_dir: 'llm_data'
