@@ -3,7 +3,7 @@ experiment:
   description: Text decoding from brain signals
   version: 1.0.0
 
-run: 'inference'
+run: 'train'
 
 logging:
   name: 'training'

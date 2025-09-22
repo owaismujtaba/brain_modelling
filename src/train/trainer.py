@@ -12,6 +12,7 @@ from functools import partial
 from typing import Dict, Any, Tuple
 from torch.utils.data import DataLoader
 
+
 import pdb
 
 
@@ -19,6 +20,7 @@ from src.dataset.utils import train_test_split_indices, get_all_files
 from src.dataset.dataset import BrainToTextDataset
 from src.train.utils import transform_data
 from src.dataset.utils import get_all_files
+from src.inference.utils import calculate_per
 
 
 from src.train.models import GRUDecoder
@@ -269,7 +271,7 @@ class Trainer:
         else:
             path = Path(self.checkpoint_dir, f'best_model')
             torch.save(checkpoint, path)
-            self.logger.info("Saved model to checkpoint: {path}")
+            self.logger.info(f"Saved model to checkpoint: {path}")
         
         with open(os.path.join(self.checkpoint_dir, 'args.yaml'), 'w') as f:
             OmegaConf.save(config=self.config, f=f)
@@ -364,9 +366,8 @@ class Trainer:
                 
                 if self.log_per_by_day:
                     for day in val_metrics['day_pers'].keys():
-                        val_per_day = val_metrics['day_pers'][day]['total_edit_distance']/val_metrics['day_pers'][day]['total_seq_length']
                         self.logger.info(
-                            f"Day:{day} Session:{session_day_dict[day]} Val PER:{val_per_day:0.4f}"
+                            f"Day:{day} Session:{session_day_dict[day]} Val PER:{val_metrics['day_pers'][day]:0.4f}"
                         )
                     
                 self.cur_val_per = val_metrics['avg_per']
@@ -392,9 +393,86 @@ class Trainer:
         self.logger.info(f"Best avg val PER {self.best_val_PER:.5f}")
         self.logger.info(f'Total training time: {(train_duration / 60):.2f} minutes')
 
-        
-
     def validation(self, val_loader) -> Tuple[Dict[str, Any], Dict[int, str]]:
+        """
+        Run validation loop with CTC loss and PER calculation using logits directly.
+
+        Args:
+            val_loader: PyTorch DataLoader for validation data.
+
+        Returns:
+            metrics (dict): Aggregated validation metrics including avg_loss and PER.
+            session_day_dict (dict): Mapping from day index to session name.
+        """
+        self.model.eval()
+
+        metrics = {
+            "logits": [],
+            "true_seq": [],
+            "phone_seq_lens": [],
+            "transcription": [],
+            "losses": [],
+            "block_nums": [],
+            "trial_nums": [],
+            "day_indices": [],
+        }
+
+        # Collect sessions per day
+        filepaths = get_all_files(
+            parent_dir=self.config["dataset"]['info']["dataset_dir"], kind="val"
+        )
+        day_index = 0
+        session_day_dict = {}
+        for session, paths in filepaths.items():
+            if not session.startswith("t15.20") or len(paths) < 1:
+                day_index += 1
+                continue
+            session_day_dict[day_index] = session
+            day_index += 1
+
+        all_logits = []
+        all_true = []
+        all_lens = []
+        all_day_indices = []
+
+        for batch in val_loader:
+            with torch.no_grad():
+                features, labels, n_time_steps, phone_seq_lens, day_indices = self._get_batch(batch)
+                adjusted_lens = ((n_time_steps - self.model_patch_size) / self.model_patch_stride + 1).to(torch.int32)
+                logits = self.model(features, day_indices)
+
+                loss = self.CTC_loss(
+                    log_probs=logits.log_softmax(2).permute(1, 0, 2),
+                    targets=labels,
+                    input_lengths=adjusted_lens,
+                    target_lengths=phone_seq_lens,
+                ).mean()
+
+            metrics["losses"].append(loss.item())
+
+            # Store logits and other info for PER calculation
+            all_logits.append(logits)
+            all_true.append(labels)
+            all_lens.extend(phone_seq_lens.tolist())
+            all_day_indices.extend(day_indices.tolist())
+
+            metrics["true_seq"].append(batch["seq_class_ids"].cpu().numpy())
+            metrics["phone_seq_lens"].append(batch["phone_seq_lens"].cpu().numpy())
+            metrics["transcription"].append(batch["transcriptions"])
+            metrics["block_nums"].append(batch["block_nums"].numpy())
+            metrics["trial_nums"].append(batch["trial_nums"].numpy())
+            metrics["day_indices"].append(batch["day_indices"].cpu().numpy())
+
+        # Compute PER using logits directly
+        avg_per, day_per = calculate_per(all_logits, all_true, all_lens, all_day_indices)
+        metrics["avg_per"] = avg_per
+        metrics["day_pers"] = day_per
+        metrics["avg_loss"] = float(np.mean(metrics["losses"]))
+
+        return metrics, session_day_dict
+
+
+    def validation1(self, val_loader) -> Tuple[Dict[str, Any], Dict[int, str]]:
         """
         Run validation loop with CTC loss and phone error rate (PER) calculation.
 

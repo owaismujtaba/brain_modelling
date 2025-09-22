@@ -1,8 +1,10 @@
 import h5py
 import pandas as pd
 import pdb
+from typing import Tuple, Dict, Any, List
+import numpy as np
 import torch
-
+import torchaudio.functional as F
 
 from src.train.utils import gauss_smooth
 
@@ -98,3 +100,62 @@ def load_h5py_file(file_path: str, b2txt_csv_df: pd.DataFrame) -> dict:
             data["corpus"].append(corpus_name)
 
     return data
+
+
+
+def calculate_per(
+    logits_list: List[torch.Tensor], 
+    true_seqs: List[torch.Tensor], 
+    phone_seq_lens: List[int], 
+    day_indices: List[int] = None
+) -> Tuple[float, Dict[int, float]]:
+    """
+    Calculate Phone Error Rate (PER) using raw logits.
+
+    Args:
+        logits_list (list): List of logits tensors (batch_size x time x n_classes).
+        true_seqs (list): List of ground truth label tensors.
+        phone_seq_lens (list): Lengths of each true sequence.
+        day_indices (list, optional): Day index for per-day aggregation.
+
+    Returns:
+        avg_per (float): Overall phone error rate.
+        day_per (dict): PER per day.
+    """
+    total_edit_distance = 0
+    total_seq_length = 0
+    day_per = {}
+
+    if day_indices is not None:
+        unique_days = np.unique(day_indices)
+        for day in unique_days:
+            day_per[day] = {"total_edit_distance": 0, "total_seq_length": 0}
+
+    # Flatten all batches
+    for batch_idx, logits in enumerate(logits_list):
+        for i in range(logits.shape[0]):
+            seq_len = phone_seq_lens[i + batch_idx * logits.shape[0]]  # correct indexing
+            pred_seq = torch.argmax(logits[i, :seq_len, :], dim=-1)
+            pred_seq = torch.unique_consecutive(pred_seq)
+            pred_seq = pred_seq[pred_seq != 0].cpu().numpy()
+            true_seq = true_seqs[batch_idx][i, :seq_len].cpu().numpy()
+
+            edit_distance = F.edit_distance(torch.tensor(pred_seq), torch.tensor(true_seq))
+            total_edit_distance += edit_distance
+            total_seq_length += seq_len
+
+            if day_indices is not None:
+                day = day_indices[i + batch_idx * logits.shape[0]]
+                day_per[day]["total_edit_distance"] += edit_distance
+                day_per[day]["total_seq_length"] += seq_len
+
+    avg_per = total_edit_distance / total_seq_length
+
+    if day_indices is not None:
+        for day in day_per:
+            if day_per[day]["total_seq_length"] > 0:
+                day_per[day] = day_per[day]["total_edit_distance"] / day_per[day]["total_seq_length"]
+            else:
+                day_per[day] = None
+
+    return avg_per, day_per
