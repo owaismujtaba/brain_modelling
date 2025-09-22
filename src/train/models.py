@@ -1,58 +1,77 @@
 import torch 
 from torch import nn
+import torch.nn.functional as F
+
+
+class ResidualBlock(nn.Module):
+    """Residual feedforward block: Linear -> ReLU -> BN -> Dropout -> Linear + skip"""
+    def __init__(self, dim, hidden_dim, dropout=0.3):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, dim)
+        self.norm = nn.BatchNorm1d(dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        # x: [B, D] or [B*T, D]
+        residual = x
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.norm(x)
+        return F.relu(x + residual)
+
 
 class GRUDecoder(nn.Module):
-    '''
-    Defines the GRU decoder
-
-    This class combines day-specific input layers, a GRU, and an output classification layer
-    '''
     def __init__(self, config):
-        super(GRUDecoder, self).__init__()
+        super().__init__()
         self.config = config
         self._setup_conf_params()
-
-        # Parameters for the day-specific input layers
-        self.day_layer_activation = nn.Softsign() # basically a shallower tanh 
-
-        # Set weights for day layers to be identity matrices so the model can learn its own day-specific transformations
-        self.day_weights = nn.ParameterList(
-            [nn.Parameter(torch.eye(self.neural_dim)) for _ in range(self.n_days)]
-        )
-        self.day_biases = nn.ParameterList(
-            [nn.Parameter(torch.zeros(1, self.neural_dim)) for _ in range(self.n_days)]
-        )
-
-        self.day_layer_dropout = nn.Dropout(self.input_dropout)
         
-        self.input_size = self.neural_dim
+        # Dropout
+        self.input_dropout = nn.Dropout(self.input_dropout)
 
-        # If we are using "strided inputs", then the input size of the first recurrent layer will actually be in_size * patch_size
-        if self.patch_size > 0:
-            self.input_size *= self.patch_size
+        # Day embeddings (additive)
+        self.day_embed = nn.Embedding(self.n_days, self.neural_dim)
 
+        # Input dimension adjustment for patching
+        self.input_size = self.neural_dim * (self.patch_size if self.patch_size > 0 else 1)
+
+        # GRU backbone
         self.gru = nn.GRU(
-            input_size = self.input_size,
-            hidden_size = self.n_units,
-            num_layers = self.n_layers,
-            dropout = self.rnn_dropout, 
-            batch_first = True, # The first dim of our input is the batch dim
-            bidirectional = False,
+            input_size=self.input_size,
+            hidden_size=self.n_units,
+            num_layers=self.n_layers,
+            dropout=self.rnn_dropout if self.n_layers > 1 else 0.0,
+            batch_first=True,
+            bidirectional=True,
         )
 
-        # Set recurrent units to have orthogonal param init and input layers to have xavier init
-        for name, param in self.gru.named_parameters():
-            if "weight_hh" in name:
-                nn.init.orthogonal_(param)
-            if "weight_ih" in name:
-                nn.init.xavier_uniform_(param)
+        out_dim = self.n_units * (2 if self.gru.bidirectional else 1)
 
-        # Prediciton head. Weight init to xavier
-        self.out = nn.Linear(self.n_units, self.n_classes)
+        # Multi-head self-attention on GRU outputs
+        self.attn = nn.MultiheadAttention(
+            embed_dim=out_dim,
+            num_heads=self.attn_heads,
+            dropout=self.attn_dropout,
+            batch_first=True,
+        )
+
+        # Residual FC head (stacked)
+        self.fc_blocks = nn.Sequential(*[
+            ResidualBlock(out_dim, self.hidden_fc, dropout=0.3)
+            for _ in range(self.n_resblocks)
+        ])
+
+        # Final classification
+        self.out = nn.Linear(out_dim, self.n_classes)
         nn.init.xavier_uniform_(self.out.weight)
 
         # Learnable initial hidden states
-        self.h0 = nn.Parameter(nn.init.xavier_uniform_(torch.zeros(1, 1, self.n_units)))
+        self.h0 = nn.Parameter(torch.empty(self.n_layers * (2 if self.gru.bidirectional else 1), 1, self.n_units))
+        nn.init.xavier_uniform_(self.h0)
+
+        self.norm = nn.LayerNorm(self.input_size)
 
     def _setup_conf_params(self):
         model_conf = self.config['model']
@@ -68,55 +87,53 @@ class GRUDecoder(nn.Module):
         self.n_days = model_conf['n_days']
         self.n_classes = model_conf['n_classes']
         
-        
+        self.hidden_fc= 256
+        self.n_resblocks=2
+        self.attn_heads=4
+        self.attn_dropout=0.1
+        self.sequence_output = True
 
+    def forward(self, x, day_idx, states=None, return_state=False):
+        """
+        x: [B, T, D]
+        day_idx: [B] (long tensor with day indices)
+        """
+        B, T, D = x.shape
 
-    def forward(self, x, day_idx, states = None, return_state = False):
-        '''
-        x        (tensor)  - batch of examples (trials) of shape: (batch_size, time_series_length, neural_dim)
-        day_idx  (tensor)  - tensor which is a list of day indexs corresponding to the day of each example in the batch x. 
-        '''
+        # Add day embeddings
+        day_vecs = self.day_embed(day_idx)  # [B, D]
+        x = x + day_vecs.unsqueeze(1)
 
-        # Apply day-specific layer to (hopefully) project neural data from the different days to the same latent space
-        day_weights = torch.stack([self.day_weights[i] for i in day_idx], dim=0)
-        day_biases = torch.cat([self.day_biases[i] for i in day_idx], dim=0).unsqueeze(1)
+        x = self.input_dropout(x)
 
-        x = torch.einsum("btd,bdk->btk", x, day_weights) + day_biases
-        x = self.day_layer_activation(x)
+        # Optional patching
+        if self.patch_size > 0:
+            x = x.permute(0, 2, 1)  # [B, D, T]
+            patches = x.unfold(2, self.patch_size, self.patch_stride)  # [B, D, num_patches, patch_size]
+            x = patches.permute(0, 2, 3, 1).reshape(B, -1, self.input_size)  # [B, num_patches, input_size]
 
-        # Apply dropout to the ouput of the day specific layer
-        if self.input_dropout > 0:
-            x = self.day_layer_dropout(x)
+        x = self.norm(x)
 
-        # (Optionally) Perform input concat operation
-        if self.patch_size > 0: 
-  
-            x = x.unsqueeze(1)                      # [batches, 1, timesteps, feature_dim]
-            x = x.permute(0, 3, 1, 2)               # [batches, feature_dim, 1, timesteps]
-            
-            # Extract patches using unfold (sliding window)
-            x_unfold = x.unfold(3, self.patch_size, self.patch_stride)  # [batches, feature_dim, 1, num_patches, patch_size]
-            
-            # Remove dummy height dimension and rearrange dimensions
-            x_unfold = x_unfold.squeeze(2)           # [batches, feature_dum, num_patches, patch_size]
-            x_unfold = x_unfold.permute(0, 2, 3, 1)  # [batches, num_patches, patch_size, feature_dim]
-
-            # Flatten last two dimensions (patch_size and features)
-            x = x_unfold.reshape(x.size(0), x_unfold.size(1), -1) 
-        
-        # Determine initial hidden states
+        # Init hidden state
         if states is None:
-            states = self.h0.expand(self.n_layers, x.shape[0], self.n_units).contiguous()
+            states = self.h0.expand(-1, B, -1).contiguous()
 
-        # Pass input through RNN 
-        output, hidden_states = self.gru(x, states)
+        # GRU
+        output, hidden_states = self.gru(x, states)  # [B, T, H]
 
-        # Compute logits
-        logits = self.out(output)
-        
+        # Self-attention (contextual refinement)
+        attn_out, _ = self.attn(output, output, output)  # [B, T, H]
+        output = output + attn_out  # residual connection
+
+        # Sequence or pooled output
+        if self.sequence_output:
+            out_fc = self.fc_blocks(output.reshape(-1, output.size(-1)))  # [B*T, H]
+            logits = self.out(out_fc).view(B, -1, self.n_classes)  # [B, T, C]
+        else:
+            pooled = output.mean(dim=1)  # [B, H]
+            out_fc = self.fc_blocks(pooled)
+            logits = self.out(out_fc)  # [B, C]
+
         if return_state:
             return logits, hidden_states
-        
         return logits
-        
-

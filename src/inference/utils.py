@@ -131,10 +131,11 @@ def calculate_per(
         for day in unique_days:
             day_per[day] = {"total_edit_distance": 0, "total_seq_length": 0}
 
-    # Flatten all batches
+    idx = 0  # flat index over all samples
     for batch_idx, logits in enumerate(logits_list):
-        for i in range(logits.shape[0]):
-            seq_len = phone_seq_lens[i + batch_idx * logits.shape[0]]  # correct indexing
+        batch_size = logits.shape[0]
+        for i in range(batch_size):
+            seq_len = phone_seq_lens[idx]
             pred_seq = torch.argmax(logits[i, :seq_len, :], dim=-1)
             pred_seq = torch.unique_consecutive(pred_seq)
             pred_seq = pred_seq[pred_seq != 0].cpu().numpy()
@@ -145,9 +146,11 @@ def calculate_per(
             total_seq_length += seq_len
 
             if day_indices is not None:
-                day = day_indices[i + batch_idx * logits.shape[0]]
+                day = day_indices[idx]
                 day_per[day]["total_edit_distance"] += edit_distance
                 day_per[day]["total_seq_length"] += seq_len
+
+            idx += 1  # move to next sample
 
     avg_per = total_edit_distance / total_seq_length
 
