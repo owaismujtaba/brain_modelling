@@ -3,19 +3,23 @@ experiment:
   description: Text decoding from brain signals
   version: 1.0.0
 
+run: 'inference'
+
 logging:
   name: 'training'
   level: INFO
-  log_file_path: 'logs/training.log'
+  log_file_path: 'logs/${run}.log'
   log_per_by_day: true
 
-run: 'train'
+
 
 dataset:
   info:
-    dataset_dir: 'data'
+    dataset_dir: 'data/raw/hdf5_data_final/'
     bad_trials_dict: None
     seed: -1
+    description_filepath: 'data/raw/t15_copyTaskData_description.csv'
+
   data_transforms:
     white_noise_std: 1.0
     constant_offset_std: 0.2

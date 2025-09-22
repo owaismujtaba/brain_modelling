@@ -160,5 +160,7 @@ def get_all_files(parent_dir, kind='train', extensions='.hdf5', logger=None):
         folder_name = os.path.basename(root)
         folder_files[folder_name] = sorted(valid_files)
         
+    sorted_dict = dict(sorted(folder_files.items()))
+    filtered_dict = {k: v for k, v in sorted_dict.items() if k.startswith("t15.202")}
 
-    return dict(sorted(folder_files.items()))
+    return filtered_dict

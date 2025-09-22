@@ -29,28 +29,28 @@ def gauss_smooth(
     Returns:
         torch.Tensor: Smoothed tensor of shape [B, T, N].
     """
-    # Create Gaussian kernel
+    # Create Gaussian kernel in numpy
+    orig_dtype = inputs.dtype
+    inputs_fp32 = inputs.to(torch.float32)
+
     kernel = np.zeros(smooth_kernel_size, dtype=np.float32)
     kernel[smooth_kernel_size // 2] = 1
     kernel = gaussian_filter1d(kernel, smooth_kernel_std)
-
     valid_idx = np.argwhere(kernel > 0.01)
     kernel = kernel[valid_idx]
     kernel = np.squeeze(kernel / np.sum(kernel))
-
-    # Convert to tensor
     kernel = torch.tensor(kernel, dtype=torch.float32, device=device)
-    kernel = kernel.view(1, 1, -1)  # [1, 1, kernel_size]
+    kernel = kernel.view(1, 1, -1)
 
-    # Prepare input for grouped convolution
-    batch_size, time_steps, channels = inputs.shape
-    inputs = inputs.permute(0, 2, 1)  # [B, C, T]
-    kernel = kernel.repeat(channels, 1, 1)  # [C, 1, kernel_size]
+    batch_size, time_steps, channels = inputs_fp32.shape
+    inputs_fp32 = inputs_fp32.permute(0, 2, 1)
+    kernel = kernel.repeat(channels, 1, 1)
 
-    # Convolution
-    smoothed = F.conv1d(inputs, kernel, padding=padding, groups=channels)
-    return smoothed.permute(0, 2, 1)  # [B, T, C]
+    smoothed = F.conv1d(inputs_fp32, kernel, padding=padding, groups=channels)
+    smoothed = smoothed.permute(0, 2, 1)
 
+    # cast back to original dtype (bfloat16)
+    return smoothed.to(orig_dtype)
 
 
 def create_attention_mask(sequence_lengths: torch.Tensor) -> torch.Tensor:
@@ -115,6 +115,7 @@ def transform_data(config, features, n_time_steps, device, mode="train"):
     data_shape = features.shape
     batch_size = data_shape[0]
     channels = data_shape[-1]
+    dtype = features.dtype  # ensure consistency
 
     transforms = config["dataset"]["data_transforms"]
     static_gain_std = transforms["static_gain_std"]
@@ -131,27 +132,27 @@ def transform_data(config, features, n_time_steps, device, mode="train"):
         # Static gain noise
         if static_gain_std > 0:
             warp_mat = torch.tile(
-                torch.unsqueeze(torch.eye(channels, device=device), dim=0),
+                torch.unsqueeze(torch.eye(channels, device=device, dtype=dtype), dim=0),
                 (batch_size, 1, 1),
             )
-            warp_mat += torch.randn_like(warp_mat, device=device) * static_gain_std
+            warp_mat += torch.randn_like(warp_mat, device=device, dtype=dtype) * static_gain_std
             features = torch.matmul(features, warp_mat)
 
         # White noise
         if white_noise_std > 0:
-            features += torch.randn(data_shape, device=device) * white_noise_std
+            features += torch.randn(data_shape, device=device, dtype=dtype) * white_noise_std
 
         # Constant offset noise
         if constant_offset_std > 0:
             features += (
-                torch.randn((batch_size, 1, channels), device=device)
+                torch.randn((batch_size, 1, channels), device=device, dtype=dtype)
                 * constant_offset_std
             )
 
         # Random walk noise
         if random_walk_std > 0:
             features += torch.cumsum(
-                torch.randn(data_shape, device=device) * random_walk_std,
+                torch.randn(data_shape, device=device, dtype=dtype) * random_walk_std,
                 dim=random_walk_axis,
             )
 
@@ -171,10 +172,3 @@ def transform_data(config, features, n_time_steps, device, mode="train"):
         )
 
     return features, n_time_steps
-
-
-
-
-
-
-
