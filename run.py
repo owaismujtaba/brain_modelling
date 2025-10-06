@@ -3,7 +3,7 @@ from src.train.trainer import training_pipeline
 from src.inference.evaluate import evaluate_pipeline
 from src.logging.log import setup_logger
 
-from src.dataset.dataset import DatasetLLM
+from src.dataset.dataset import DatasetNeural
 
 config = load_yaml_config('config.yaml')
 

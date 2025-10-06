@@ -19,8 +19,8 @@ import pdb
 from typing import Dict, List, Tuple, Any
 
 
-class DatasetLLM:
-    """Dataset handler for LLM training and validation data."""
+class DatasetNeural:
+    """Dataset handler for NeuralData training and validation data."""
 
     def __init__(self, config: Dict[str, Any], logger):
         """

@@ -19,6 +19,7 @@ from src.inference.utils import calculate_per
 from src.train.models import GRUDecoder
 from src.utils import log_info
 
+import pdb
 
 class Trainer:
     def __init__(self, config, logger, model):
@@ -281,6 +282,7 @@ class Trainer:
                         self.logger.info(f"Day {day} | Session {session_day_dict[day]} | Val PER: {per:.4f}")
 
                 if self.cur_val_per < self.best_val_per:
+                    self.logger.info(f"New best PER: {self.cur_val_per:.4f} (prev {self.best_val_per:.4f}), saving model.") 
                     self.best_val_per = self.cur_val_per
                     self.best_val_loss = self.cur_val_loss
                     self.save_model_checkpoint(batch_no=i, best=True)
@@ -356,6 +358,7 @@ def training_pipeline(config, logger):
     n_data_workers = train_conf['n_data_workers']
 
     train_filepaths = get_all_files(config['dataset']['info']['dataset_dir'], kind='train', logger=logger)
+
     train_trials, _ = train_test_split_indices(config=config, file_paths=train_filepaths, logger=logger)
     train_ds = BrainToTextDataset(trial_indices=train_trials, config=config, logger=logger, kind='train')
     train_loader = DataLoader(train_ds, batch_size=None, shuffle=shuffle, num_workers=n_data_workers, pin_memory=pin_memory)

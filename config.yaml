@@ -3,11 +3,11 @@ experiment:
   description: Text decoding from brain signals
   version: 1.0.0
 
-run: 'create_llm_dataset' # train/inference
+run: 'train' # train/inference
 create_llm_dataset: true
 
 logging:
-  name: 'create_llm_dataset'
+  name: 'train_rnn'
   level: INFO
   log_file_path: 'logs/${run}.log'
   log_per_by_day: true
@@ -16,7 +16,7 @@ logging:
 
 dataset:
   info:
-    dataset_dir: 'C:\Users\Investigador\work\brain_modelling\data\data\raw\hdf5_data_final'
+    dataset_dir: 'data/raw/hdf5_data_final'
     bad_trials_dict: None
     seed: -1
     description_filepath: 'data/raw/t15_copyTaskData_description.csv'
@@ -33,7 +33,7 @@ dataset:
     smooth_kernel_std: 2
 
 model:
-  name: 'GRU_Attention'
+  name: 'GRU_decoder'
   neural_dim: 512
   n_units: 768
   n_layers: 7
@@ -53,10 +53,10 @@ model:
 
 train:
   init_from_checkpoint: false
-  init_checkpoint_path: '/home/owais/Desktop/work/brain_modelling/trained_models/GRU/checkpoint/best_model'
+  init_checkpoint_path: ''
 
   test_percentage: 0
-  batch_size: 16
+  batch_size: 64
   n_train_batches: 120000
   days_per_batch: 4
   must_include_days: []
@@ -64,7 +64,7 @@ train:
   pin_memory: true
   shuffle_data: false
   device: 'GPU'
-  n_data_workers: 4
+  n_data_workers: 2
 
   num_training_batches: 120000
   lr_scheduler_type: cosine
